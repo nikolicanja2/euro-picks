@@ -201,44 +201,130 @@ def current_user_client():
     return client
 
 
+
+def _set_public_auth_mode(mode):
+    st.session_state["public_auth_mode"] = mode
+
+
 def auth_screen():
-    st.title("🏀 EURO PICKS")
-    st.subheader("Dobro došli")
-    st.write("LIGHT pristup omogućava pregled početne stranice i Premium paketa. Analitika je dostupna Premium članovima.")
-    login_tab, register_tab = st.tabs(["Prijava", "Napravi nalog"])
-    with login_tab:
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Lozinka", type="password", key="login_password")
-        if st.button("Prijavi se", type="primary", use_container_width=True):
-            try:
-                result = supabase.auth.sign_in_with_password({"email": email.strip(), "password": password})
-                st.session_state["sb_access_token"] = result.session.access_token
-                st.session_state["sb_refresh_token"] = result.session.refresh_token
-                st.session_state["sb_user"] = {"id": result.user.id, "email": result.user.email}
-                st.rerun()
-            except Exception as e:
-                st.error(f"Prijava nije uspela: {e}")
-    with register_tab:
-        new_email = st.text_input("Email adresa", key="register_email")
-        new_password = st.text_input("Lozinka (najmanje 8 karaktera)", type="password", key="register_password")
-        confirm = st.text_input("Ponovi lozinku", type="password", key="register_confirm")
-        if st.button("Registruj se", use_container_width=True):
-            if not new_email.strip() or len(new_password) < 8:
-                st.warning("Unesi ispravnu email adresu i lozinku od najmanje 8 karaktera.")
-            elif new_password != confirm:
-                st.warning("Lozinke se ne podudaraju.")
-            else:
-                try:
-                    result = supabase.auth.sign_up({"email": new_email.strip(), "password": new_password})
-                    if result.session:
+    """Public, data-free preview shown before authentication."""
+    st.markdown("""
+    <style>
+      .ep-hero {padding: 1.35rem 1.5rem; border-radius: 18px;
+        background: linear-gradient(120deg,#101827,#243b55); color:white; margin-bottom:1rem;}
+      .ep-hero h1 {color:white; margin:0 0 .35rem 0;}
+      .ep-hero p {color:#d7e0eb; margin:0;}
+      .ep-card {border:1px solid rgba(128,140,155,.28); border-radius:14px;
+        padding:1rem; min-height:112px; background:rgba(128,140,155,.06);}
+      .ep-muted {opacity:.72; font-size:.88rem;}
+      .ep-dash {font-size:1.55rem; font-weight:700; letter-spacing:.12em; margin-top:.55rem;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    left, spacer, login_col, register_col = st.columns([5, 1, 1.5, 1.8])
+    with left:
+        st.markdown("## 🏀 EURO PICKS")
+    with login_col:
+        st.button("Prijavi se", key="public_login_btn", use_container_width=True,
+                  on_click=_set_public_auth_mode, args=("login",))
+    with register_col:
+        st.button("Napravi nalog", key="public_register_btn", type="primary",
+                  use_container_width=True, on_click=_set_public_auth_mode, args=("register",))
+
+    st.markdown("""
+    <div class="ep-hero">
+      <h1>Evroliga na jednom mestu.</h1>
+      <p>Detaljna statistika, analiza igrača, timova i utakmica — pregledno i na jednom mestu.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### Upoznaj EURO PICKS")
+    st.caption("Ovo je javni demo prikaz. Statistički podaci i analitika dostupni su nakon aktivacije Premium pristupa.")
+    sections = [
+        ("🏀", "Utakmice", "Pregled odigranih utakmica i rezultata"),
+        ("📊", "Tabela Evrolige", "Plasman i učinak svih timova"),
+        ("👤", "Profili igrača", "Individualna statistika i forma"),
+        ("🛡️", "Analiza protivnika", "Učinak igrača protiv svakog tima"),
+        ("📈", "Grafikoni", "Kretanje statistike kroz sezonu"),
+        ("🤝", "Odsustva igrača", "Uticaj izostanaka saigrača na učinak"),
+    ]
+    cols = st.columns(3)
+    for i, (emoji, heading, description) in enumerate(sections):
+        with cols[i % 3]:
+            st.markdown(
+                f'<div class="ep-card"><div style="font-size:1.35rem">{emoji}</div>'
+                f'<b>{heading}</b><div class="ep-muted">{description}</div>'
+                f'<div class="ep-dash">— — —</div></div>',
+                unsafe_allow_html=True
+            )
+    st.markdown("### Primer statističkog prikaza")
+    c1, c2, c3, c4 = st.columns(4)
+    for col, label in zip((c1, c2, c3, c4), ("Poeni", "Skokovi", "Asistencije", "Minuti")):
+        with col:
+            st.metric(label, "—", help="Statistika je dostupna Premium članovima.")
+    st.markdown("### Kako funkcioniše pristup")
+    step_cols = st.columns(3)
+    for col, number, heading, desc in zip(
+        step_cols, ("1", "2", "3"),
+        ("Napravi nalog", "Izaberi paket", "Aktiviraj Premium"),
+        ("Registruj se besplatno.", "Izaberi 1, 3, 6 ili 12 meseci.", "Nakon uplate administracija odobrava pristup.")
+    ):
+        with col:
+            st.markdown(f"**{number}. {heading}**")
+            st.caption(desc)
+
+    mode = st.session_state.get("public_auth_mode")
+    if mode:
+        st.markdown("---")
+        if mode == "login":
+            st.subheader("Prijava")
+            email = st.text_input("Email", key="public_login_email")
+            password = st.text_input("Lozinka", type="password", key="public_login_password")
+            a, b = st.columns(2)
+            with a:
+                if st.button("Prijavi se", type="primary", use_container_width=True, key="public_do_login"):
+                    try:
+                        result = supabase.auth.sign_in_with_password({"email": email.strip(), "password": password})
                         st.session_state["sb_access_token"] = result.session.access_token
                         st.session_state["sb_refresh_token"] = result.session.refresh_token
                         st.session_state["sb_user"] = {"id": result.user.id, "email": result.user.email}
+                        st.session_state.pop("public_auth_mode", None)
                         st.rerun()
+                    except Exception as e:
+                        st.error(f"Prijava nije uspela: {e}")
+            with b:
+                if st.button("Napravi nalog", use_container_width=True, key="switch_to_register"):
+                    st.session_state["public_auth_mode"] = "register"
+                    st.rerun()
+        else:
+            st.subheader("Napravi nalog")
+            new_email = st.text_input("Email adresa", key="public_register_email")
+            new_password = st.text_input("Lozinka (najmanje 8 karaktera)", type="password", key="public_register_password")
+            confirm = st.text_input("Ponovi lozinku", type="password", key="public_register_confirm")
+            a, b = st.columns(2)
+            with a:
+                if st.button("Registruj se", type="primary", use_container_width=True, key="public_do_register"):
+                    if not new_email.strip() or len(new_password) < 8:
+                        st.warning("Unesi ispravnu email adresu i lozinku od najmanje 8 karaktera.")
+                    elif new_password != confirm:
+                        st.warning("Lozinke se ne podudaraju.")
                     else:
-                        st.success("Nalog je napravljen. Proveri email i potvrdi adresu, pa se prijavi.")
-                except Exception as e:
-                    st.error(f"Registracija nije uspela: {e}")
+                        try:
+                            result = supabase.auth.sign_up({"email": new_email.strip(), "password": new_password})
+                            if result.session:
+                                st.session_state["sb_access_token"] = result.session.access_token
+                                st.session_state["sb_refresh_token"] = result.session.refresh_token
+                                st.session_state["sb_user"] = {"id": result.user.id, "email": result.user.email}
+                                st.session_state.pop("public_auth_mode", None)
+                                st.rerun()
+                            else:
+                                st.success("Nalog je napravljen. Proveri email i potvrdi adresu, pa se prijavi.")
+                        except Exception as e:
+                            st.error(f"Registracija nije uspela: {e}")
+            with b:
+                if st.button("Već imam nalog", use_container_width=True, key="switch_to_login"):
+                    st.session_state["public_auth_mode"] = "login"
+                    st.rerun()
 
 
 if not st.session_state.get("sb_access_token"):
