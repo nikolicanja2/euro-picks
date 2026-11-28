@@ -1,8 +1,6 @@
-"""EURO PICKS SportAPI worker: EuroLeague only, low-request polling.
-
-Stores complete per-player shooting splits and DNP rows.
-The v2 marker causes one controlled backfill of recent games after the SQL migration;
-after that, already-ingested games are skipped.
+"""EURO PICKS SportAPI worker: checks the complete current EuroLeague season.
+Stores per-player boxscores and explicit DNP rows; re-fetches finished games each run
+so previously incomplete DNP/status data can be filled in.
 """
 import logging
 import re
@@ -386,10 +384,8 @@ def main():
     player_rows, box_rows = [], []
     fetched_games = skipped_games = dnp_count = 0
     for game in finished:
-        if already_has_v2_boxscore(game["id"]):
-            skipped_games += 1
-            continue
-
+        # Re-fetch every finished game from the current season. This is intentional:
+        # old boxscores may exist but lack DNP rows or teammate status information.
         payload = get(f"/games/{game['id']}/players")
         sides = payload.get("data") or {}
         game_rows_for_box = []
@@ -457,7 +453,7 @@ def main():
 
     upsert("players", player_rows)
     upsert("player_boxscores", box_rows, "game_id,player_id,source")
-    logging.info("Fetched expanded boxscores for %d games; skipped %d already v2 games", fetched_games, skipped_games)
+    logging.info("Rechecked full-season boxscores for %d finished games", fetched_games)
     logging.info("Upserted %d player rows; DNP rows: %d", len(deduplicate(player_rows, "id")), dnp_count)
 
     try:
