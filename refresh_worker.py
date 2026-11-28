@@ -1,6 +1,6 @@
-"""EURO PICKS SportAPI worker: checks the complete current EuroLeague season.
-Stores per-player boxscores and explicit DNP rows; re-fetches finished games each run
-so previously incomplete DNP/status data can be filled in.
+"""EURO PICKS SportAPI worker: EuroLeague only, low-request polling.
+
+Stores player box scores and SofaScore shooting splits for the current EuroLeague season.
 """
 import logging
 import re
@@ -184,13 +184,21 @@ def sofa_line_row(game_id, player_id, team_id, line, dnp_reason=None):
 
 def run_sofascore_enrichment():
     """Best-effort SofaScore enrichment; never blocks successful SportAPI ingestion."""
+    # Učitaj sve utakmice tekuće sezone iz baze, ne samo poslednjih 7 dana.
     today = datetime.now(SOFA_TZ).date()
-    dates = [(today + timedelta(days=i)).isoformat() for i in range(-7, 3)]
-    start = datetime.combine(today - timedelta(days=8), datetime.min.time(), SOFA_TZ).astimezone(timezone.utc)
-    end = datetime.combine(today + timedelta(days=3), datetime.max.time(), SOFA_TZ).astimezone(timezone.utc)
-
-    games = (sb.table("games").select("id,start_time,home_team_id,away_team_id")
-             .gte("start_time", start.isoformat()).lte("start_time", end.isoformat()).limit(1000).execute().data or [])
+    season_start_year = today.year if today.month >= 7 else today.year - 1
+    season_start = datetime(season_start_year, 7, 1, tzinfo=SOFA_TZ).astimezone(timezone.utc)
+    games = []
+    offset = 0
+    while True:
+        page = (sb.table("games").select("id,start_time,home_team_id,away_team_id")
+                .gte("start_time", season_start.isoformat())
+                .range(offset, offset + 999).execute().data or [])
+        games.extend(page)
+        if len(page) < 1000:
+            break
+        offset += 1000
+    dates = set()
     team_ids = list({tid for game in games for tid in (game.get("home_team_id"), game.get("away_team_id")) if tid})
     teams = sb.table("teams").select("id,name").in_("id", team_ids).limit(1000).execute().data or [] if team_ids else []
     team_names = {t["id"]: sofa_norm(t.get("name")) for t in teams}
@@ -206,6 +214,7 @@ def run_sofascore_enrichment():
             continue
         game_map[(local_day, home, away)] = game
         game_map[(local_day, away, home)] = game
+        dates.add(local_day)
 
     player_map = {}
     offset = 0
@@ -300,9 +309,8 @@ def main():
         return
     logging.info("EuroLeague competitions selected: %s", [x.get("name") for x in euro_leagues])
 
-    # Read the full current EuroLeague season on every run. Existing complete
-    # v2 boxscores are skipped below; games missing from the database are backfilled
-    # from the start of the season, not just from a rolling 10-day window.
+    # API endpoint is already scoped to the league's current_season.
+    # Keep every returned game so the first run can backfill the full season.
     games_by_id = {}
 
     # Use the league's own schedule/results endpoint instead of the global
@@ -312,7 +320,7 @@ def main():
         slug = league.get("slug") or "euroleague"
         season = league.get("current_season")
         for status in ("finished", "scheduled"):
-            params = {"status": status, "limit": 500}
+            params = {"status": status, "limit": 200}
             if season:
                 params["season"] = str(season)
             payload = get(f"/leagues/{slug}/games", params)
@@ -327,6 +335,7 @@ def main():
                         start_dt = datetime.fromisoformat(str(start_value).replace("Z", "+00:00"))
                         if start_dt.tzinfo is None:
                             start_dt = start_dt.replace(tzinfo=ZoneInfo("UTC"))
+                        local_day = start_dt.astimezone(ZoneInfo("Europe/Belgrade")).date().isoformat()
                     except (TypeError, ValueError):
                         logging.warning("Could not parse game date %r for game %s", start_value, game.get("id"))
                         continue
@@ -379,13 +388,15 @@ def main():
     upsert("competition_seasons", season_rows)
     upsert("teams", team_rows)
     upsert("games", game_rows)
-    logging.info("EuroLeague: %d current-season games found; %d finished games advertise box scores", len(game_rows), len(finished))
+    logging.info("EuroLeague current season: %d games returned; %d finished games advertise box scores", len(game_rows), len(finished))
 
     player_rows, box_rows = [], []
     fetched_games = skipped_games = dnp_count = 0
     for game in finished:
-        # Re-fetch every finished game from the current season. This is intentional:
-        # old boxscores may exist but lack DNP rows or teammate status information.
+        if already_has_v2_boxscore(game["id"]):
+            skipped_games += 1
+            continue
+
         payload = get(f"/games/{game['id']}/players")
         sides = payload.get("data") or {}
         game_rows_for_box = []
@@ -453,7 +464,7 @@ def main():
 
     upsert("players", player_rows)
     upsert("player_boxscores", box_rows, "game_id,player_id,source")
-    logging.info("Rechecked full-season boxscores for %d finished games", fetched_games)
+    logging.info("Fetched expanded boxscores for %d games; skipped %d already v2 games", fetched_games, skipped_games)
     logging.info("Upserted %d player rows; DNP rows: %d", len(deduplicate(player_rows, "id")), dnp_count)
 
     try:
