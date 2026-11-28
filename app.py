@@ -186,6 +186,30 @@ supabase = get_supabase()
 ADMIN_EMAIL = "anjanikolicfakultet@gmail.com"
 
 
+def send_europicks_notification(subject, html_body):
+    """Send an admin notification through Resend; app operation remains successful if email fails."""
+    try:
+        resend_key = st.secrets.get("RESEND_API_KEY", "")
+        if not resend_key:
+            return False, "RESEND_API_KEY nije podešen u Streamlit Secrets."
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            json={
+                "from": "EURO PICKS <onboarding@resend.dev>",
+                "to": [ADMIN_EMAIL],
+                "subject": subject,
+                "html": html_body,
+            },
+            timeout=15,
+        )
+        if response.ok:
+            return True, None
+        return False, f"Resend HTTP {response.status_code}: {response.text[:500]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def current_user_client():
     client = get_supabase()
     access = st.session_state.get("sb_access_token")
@@ -401,7 +425,20 @@ if not is_admin and not is_premium:
                     "note": payment_note.strip(),
                     "status": "pending",
                 }).execute()
+                email_html = (
+                    "<h2>Novi EURO PICKS Premium zahtev</h2>"
+                    f"<p><b>Korisnik:</b> {html.escape(payment_email.strip())}</p>"
+                    f"<p><b>Paket:</b> {html.escape(chosen_plan)}</p>"
+                    f"<p><b>Trajanje:</b> {plans[chosen_plan]} dana</p>"
+                    f"<p><b>Napomena:</b> {html.escape(payment_note.strip() or '—')}</p>"
+                    f"<p><b>Vreme:</b> {datetime.now(ZoneInfo('Europe/Belgrade')).strftime('%d.%m.%Y. %H:%M')}</p>"
+                )
+                sent, mail_error = send_europicks_notification("Novi Premium zahtev – EURO PICKS", email_html)
                 st.success("Zahtev je poslat. Sačekaj instrukcije za uplatu i potvrdu administracije.")
+                if sent:
+                    st.info("Obaveštenje je poslato administratoru na email.")
+                else:
+                    st.warning("Zahtev je sačuvan, ali email obaveštenje nije poslato. Proveri Resend podešavanja. " + str(mail_error))
             except Exception as e:
                 st.error(f"Zahtev nije sačuvan. Proveri da li je SQL podešavanje završeno: {e}")
     st.markdown("---")
