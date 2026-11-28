@@ -33,8 +33,8 @@ def _ep_absence_number(value):
 
 
 def show_absence_impact(sb_client, selected_player_name):
-    """Poredi prosek poena kroz sve utakmice sa potvrđenim statusom saigrača."""
-    st.subheader("POENI SA SAIGRAČEM I BEZ NJEGA")
+    """Poredi statistiku igraca kroz celu istoriju sa potvrđenim statusom saigrača."""
+    st.subheader("UTICAJ SAIGRAČA NA STATISTIKU IGRAČA")
     try:
         players = (
             sb_client.table("players").select("id,full_name")
@@ -47,7 +47,7 @@ def show_absence_impact(sb_client, selected_player_name):
 
         target_rows = _ep_absence_fetch(
             sb_client, "player_boxscores",
-            "game_id,player_id,team_id,minutes,pts,dnp_reason,source",
+            "game_id,player_id,team_id,minutes,pts,reb,ast,tpm,pir,dnp_reason,source",
             "player_id", target_ids
         )
         target_rows = [r for r in target_rows if r.get("game_id")]
@@ -60,13 +60,12 @@ def show_absence_impact(sb_client, selected_player_name):
         valid_game_ids = {g["id"] for g in games if g.get("id")}
         source_rank = {"sportapi": 0, "sofascore": 1}
 
-        # Izabranom igraču računamo samo utakmice u kojima je zaista nastupio.
         target_by_game = {}
         for row in target_rows:
             gid = row.get("game_id")
             minutes = _ep_absence_number(row.get("minutes"))
-            points = _ep_absence_number(row.get("pts"))
-            if gid not in valid_game_ids or row.get("dnp_reason") or minutes is None or minutes <= 0 or points is None:
+            if (gid not in valid_game_ids or row.get("dnp_reason") or minutes is None
+                    or minutes <= 0):
                 continue
             old = target_by_game.get(gid)
             rank = source_rank.get(str(row.get("source") or "").lower(), 9)
@@ -75,25 +74,23 @@ def show_absence_impact(sb_client, selected_player_name):
                 target_by_game[gid] = row
 
         if not target_by_game:
-            st.info("Nema odigranih utakmica ovog igrača sa dostupnim podacima o poenima.")
+            st.info("Nema odigranih utakmica ovog igrača sa dostupnim statističkim podacima.")
             return
 
-        # Učitavamo redove svih utakmica iz istorije izabranog igrača,
-        # a ne samo poslednju utakmicu. Tako pronalazimo svakog saigrača
-        # koji ima makar jedan eksplicitno evidentiran DNP u tom periodu.
+        # Status saigrača se proverava u SVAKOJ utakmici istorije, ne samo u poslednjoj.
         all_rows = _ep_absence_fetch(
             sb_client, "player_boxscores",
             "game_id,player_id,team_id,minutes,dnp_reason",
             "game_id", list(target_by_game), limit=10000
         )
-        target_team_by_game = {gid: row.get("team_id") for gid, row in target_by_game.items()}
+        team_by_game = {gid: row.get("team_id") for gid, row in target_by_game.items()}
         teammate_ids = set()
         for row in all_rows:
             gid = row.get("game_id")
             if not row.get("player_id") or row.get("player_id") in target_ids or not row.get("dnp_reason"):
                 continue
-            target_team = target_team_by_game.get(gid)
-            if target_team and row.get("team_id") != target_team:
+            team_id = team_by_game.get(gid)
+            if team_id and row.get("team_id") != team_id:
                 continue
             teammate_ids.add(row["player_id"])
 
@@ -107,15 +104,13 @@ def show_absence_impact(sb_client, selected_player_name):
         chosen = st.selectbox("Izaberi saigrača za poređenje", choices, key="ep_absence_teammate_inline")
         chosen_ids = {pid for pid in teammate_ids if names.get(pid, pid) == chosen}
 
-        # Status se utvrđuje za svaku utakmicu zasebno. Ako postoji konflikt
-        # između izvora (i DNP i minuti > 0), utakmica se izostavlja kao nejasna.
         status_by_game = {}
         for row in all_rows:
             if row.get("player_id") not in chosen_ids:
                 continue
             gid = row.get("game_id")
-            target_team = target_team_by_game.get(gid)
-            if target_team and row.get("team_id") != target_team:
+            team_id = team_by_game.get(gid)
+            if team_id and row.get("team_id") != team_id:
                 continue
             state = status_by_game.setdefault(gid, {"dnp": False, "played": False})
             if row.get("dnp_reason"):
@@ -124,24 +119,34 @@ def show_absence_impact(sb_client, selected_player_name):
             if minutes is not None and minutes > 0:
                 state["played"] = True
 
-        points_without, points_with = [], []
+        stat_options = ["Poeni", "Skokovi", "Asistencije", "Trojke", "PIR", "PTS + REB", "PTS + AST", "REB + AST", "PRA"]
+        stat_choice = st.selectbox("Statistika za poređenje", stat_options, key="ep_absence_stat_inline")
+        stat_cols = {
+            "Poeni": ("pts",), "Skokovi": ("reb",), "Asistencije": ("ast",),
+            "Trojke": ("tpm",), "PIR": ("pir",), "PTS + REB": ("pts", "reb"),
+            "PTS + AST": ("pts", "ast"), "REB + AST": ("reb", "ast"),
+            "PRA": ("pts", "reb", "ast")
+        }
+        values_with, values_without = [], []
         for gid, target in target_by_game.items():
             status = status_by_game.get(gid)
+            # Nepoznat ili kontradiktoran status se ne računa.
             if not status or status["dnp"] == status["played"]:
                 continue
-            points = _ep_absence_number(target.get("pts"))
-            if points is None:
+            vals = [_ep_absence_number(target.get(col)) for col in stat_cols[stat_choice]]
+            if any(v is None for v in vals):
                 continue
-            if status["dnp"]:
-                points_without.append(points)
+            value = sum(vals)
+            if status["played"]:
+                values_with.append(value)
             else:
-                points_with.append(points)
+                values_without.append(value)
 
-        avg_with = sum(points_with) / len(points_with) if points_with else None
-        avg_without = sum(points_without) / len(points_without) if points_without else None
+        avg_with = sum(values_with) / len(values_with) if values_with else None
+        avg_without = sum(values_without) / len(values_without) if values_without else None
         left, right = st.columns(2)
-        left.metric("SA SAIGRAČEM", f"{avg_with:.1f}" if avg_with is not None else "—")
-        right.metric("BEZ SAIGRAČA", f"{avg_without:.1f}" if avg_without is not None else "—")
+        left.metric(f"{stat_choice.upper()} SA SAIGRAČEM", f"{avg_with:.1f}" if avg_with is not None else "—", f"{len(values_with)} utakmica")
+        right.metric(f"{stat_choice.upper()} BEZ SAIGRAČA", f"{avg_without:.1f}" if avg_without is not None else "—", f"{len(values_without)} utakmica")
         if avg_with is None or avg_without is None:
             st.info("Nema dovoljno potvrđenih utakmica za obe situacije. Nepoznati statusi nisu uračunati.")
     except Exception as exc:
@@ -464,6 +469,19 @@ border-radius:20px;padding:22px 28px;margin:22px 0}
 @media(max-width:700px){.ep-topbar{grid-template-columns:1fr;text-align:center}.ep-league{border:0}.ep-live{justify-self:center}.ep-hero{grid-template-columns:1fr;padding:20px}.ep-match{border-left:0;border-top:1px solid #29436e;padding:18px 0 0}.ep-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ep-pick{grid-template-columns:1fr}.ep-pick-side{border-left:0;border-top:1px solid #35517f;padding:15px 0 0}}
 
 
+/* Čitljivost tabova i padajućih menija */
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: #ffffff !important;
+  color: #080808 !important;
+  border-bottom: 3px solid #f28c28 !important;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] * { color: #080808 !important; }
+[data-baseweb="popover"] [role="option"] { background: #ffffff !important; color: #111111 !important; }
+[data-baseweb="popover"] [role="option"] * { color: #111111 !important; }
+[data-baseweb="select"] input { color: #111111 !important; }
+.stAlert, [data-testid="stAlert"] { background: #111111 !important; color: #ffffff !important; }
+.stAlert p, [data-testid="stAlert"] p { color: #ffffff !important; }
+
 /* EURO PICKS brand palette: black, orange and white */
 .stApp { background:#050505 !important; color:#ffffff !important; }
 [data-testid="stAppViewContainer"], [data-testid="stMain"] { background:#050505 !important; }
@@ -494,7 +512,18 @@ button[kind="primary"] { background:#f28c28 !important; color:#080808 !important
 div[data-testid="stMetric"] { background:#101010 !important; border-color:#393939 !important; }
 div[data-testid="stMetric"] label, div[data-testid="stMetric"] [data-testid="stMetricValue"] { color:#ffffff !important; }
 div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color:#f28c28 !important; background:#2a1808 !important; }
-.stAlert { background:#111111 !important; border:1px solid #8b4b13 !important; color:#ffffff !important; }
+/* Streamlit info/warning/success messages: force readable contrast */
+div[data-testid="stAlert"], div[data-testid="stAlert"] > div,
+.stAlert, .stAlert > div {
+  background:#111111 !important;
+  border:1px solid #f28c28 !important;
+  color:#ffffff !important;
+}
+div[data-testid="stAlert"] *, .stAlert * {
+  color:#ffffff !important;
+  opacity:1 !important;
+}
+div[data-testid="stAlert"] svg, .stAlert svg { fill:#f28c28 !important; color:#f28c28 !important; }
 hr { border-color:#444444 !important; }
 
 </style>
