@@ -48,7 +48,8 @@ def show_absence_impact(sb_client, selected_player_name):
             "game_id,player_id,team_id,minutes,pts,reb,ast,tpm,pir,dnp_reason,source",
             "player_id", target_ids
         )
-        target_rows = [r for r in target_rows if r.get("game_id")]
+        # SportAPI is the canonical season-wide source for both appearances and DNP.
+        target_rows = [r for r in target_rows if r.get("game_id") and str(r.get("source") or "").lower() == "sportapi"]
         game_ids = list(dict.fromkeys(r["game_id"] for r in target_rows))
         if not game_ids:
             st.info("Nema sačuvanih utakmica za izabranog igrača.")
@@ -77,6 +78,7 @@ def show_absence_impact(sb_client, selected_player_name):
             "game_id,player_id,team_id,minutes,pts,reb,ast,tpm,pir,dnp_reason,source",
             "game_id", list(target_by_game), limit=10000
         )
+        all_rows = [r for r in all_rows if str(r.get("source") or "").lower() == "sportapi"]
         target_team_by_game = {gid: row.get("team_id") for gid, row in target_by_game.items()}
         teammate_ids = set()
         for row in all_rows:
@@ -861,50 +863,76 @@ b.metric("Minuta", fmt(avg(player_df, "min")))
 c.metric("FG%", fmt(100 * safe_num(player_df["fgm"]).sum() / max(1, safe_num(player_df["fga"]).sum())))
 d.metric("3P%", fmt(100 * safe_num(player_df["3pm"]).sum() / max(1, safe_num(player_df["3pa"]).sum())))
 
-# SofaScore detalj po protivniku – ostaje na postojećoj stranici profila igrača.
+# Učinak igrača po protivniku — SportAPI boxscore za svaku utakmicu.
 st.markdown("### 🏀 Učinak igrača po protivniku")
-st.caption("Podaci sa SofaScore-a: minutaža, slobodna bacanja, šutevi za 2 i šutevi za 3.")
+st.caption("Izvor: SportAPI • minutaža, slobodna bacanja, šutevi za 2 i šutevi za 3.")
 try:
-    sofa_players = (sb.table("players").select("id,full_name")
-                    .ilike("full_name", str(chosen_player)).limit(50).execute().data or [])
-    sofa_player_ids = [x["id"] for x in sofa_players if x.get("id")]
-    sofa_rows = []
-    for start_idx in range(0, len(sofa_player_ids), 100):
-        ids_part = sofa_player_ids[start_idx:start_idx + 100]
-        if ids_part:
-            response = (sb.table("player_boxscores")
-                        .select("game_id,player_id,team_id,minutes,ftm,fta,fgm,fga,tpm,tpa,source")
-                        .in_("player_id", ids_part).eq("source", "sofascore")
-                        .limit(10000).execute())
-            sofa_rows.extend(response.data or [])
+    # Profilni CSV i SportAPI mogu zapisivati ime sa različitim dijakriticima.
+    # Prvo tražimo tačno ime, a zatim proširujemo pretragu po prezimenu.
+    db_players = (sb.table("players").select("id,full_name")
+                  .ilike("full_name", str(chosen_player)).limit(100).execute().data or [])
+    if not db_players:
+        surname = str(chosen_player).strip().split()[-1]
+        db_players = (sb.table("players").select("id,full_name")
+                      .ilike("full_name", f"%{surname}%").limit(500).execute().data or [])
 
-    # One SofaScore row per player/game; retain the newest exact source row.
-    sofa_by_game = {}
-    for row in sofa_rows:
-        if row.get("game_id") and row.get("team_id"):
-            sofa_by_game[row["game_id"]] = row
-    sofa_game_ids = list(sofa_by_game)
-    sofa_games = []
-    for start_idx in range(0, len(sofa_game_ids), 100):
-        part = sofa_game_ids[start_idx:start_idx + 100]
-        if part:
-            response = (sb.table("games").select("id,start_time,home_team_id,away_team_id")
-                        .in_("id", part).limit(1000).execute())
-            sofa_games.extend(response.data or [])
-    sofa_team_ids = list({tid for game in sofa_games for tid in (game.get("home_team_id"), game.get("away_team_id")) if tid})
-    sofa_teams = []
-    for start_idx in range(0, len(sofa_team_ids), 100):
-        part = sofa_team_ids[start_idx:start_idx + 100]
-        if part:
-            response = sb.table("teams").select("id,name").in_("id", part).limit(1000).execute()
-            sofa_teams.extend(response.data or [])
-    sofa_team_names = {x["id"]: x.get("name") or "Nepoznat tim" for x in sofa_teams}
-    sofa_game_map = {x["id"]: x for x in sofa_games}
-    display_rows = []
-    for gid, row in sofa_by_game.items():
-        game = sofa_game_map.get(gid)
+    normalized_name = normalize_player_name(chosen_player)
+    exact_players = [
+        p for p in db_players
+        if normalize_player_name(p.get("full_name")) == normalized_name
+    ]
+    # Keep the exact normalized match whenever possible; only fall back to
+    # candidate rows if the provider uses a materially different name form.
+    selected_db_players = exact_players or db_players
+    player_ids = [p["id"] for p in selected_db_players if p.get("id")]
+
+    box_rows = []
+    for offset in range(0, len(player_ids), 100):
+        ids = player_ids[offset:offset + 100]
+        if ids:
+            result = (sb.table("player_boxscores")
+                      .select("game_id,player_id,team_id,minutes,ftm,fta,fgm,fga,tpm,tpa,dnp_reason,source")
+                      .in_("player_id", ids)
+                      .eq("source", "sportapi")
+                      .limit(10000).execute())
+            box_rows.extend(result.data or [])
+
+    # One SportAPI appearance row per player/game; exclude DNP entries.
+    appearances = {}
+    for row in box_rows:
+        if row.get("game_id") and row.get("team_id") and not row.get("dnp_reason"):
+            appearances[row["game_id"]] = row
+
+    game_ids = list(appearances)
+    game_rows = []
+    for offset in range(0, len(game_ids), 100):
+        ids = game_ids[offset:offset + 100]
+        if ids:
+            result = (sb.table("games")
+                      .select("id,start_time,home_team_id,away_team_id")
+                      .in_("id", ids).limit(1000).execute())
+            game_rows.extend(result.data or [])
+
+    team_ids = list({
+        tid for game in game_rows
+        for tid in (game.get("home_team_id"), game.get("away_team_id")) if tid
+    })
+    team_rows = []
+    for offset in range(0, len(team_ids), 100):
+        ids = team_ids[offset:offset + 100]
+        if ids:
+            result = sb.table("teams").select("id,name").in_("id", ids).limit(1000).execute()
+            team_rows.extend(result.data or [])
+
+    games_by_id = {g["id"]: g for g in game_rows}
+    team_names = {t["id"]: t.get("name") or "Nepoznat tim" for t in team_rows}
+    output = []
+
+    for game_id, row in appearances.items():
+        game = games_by_id.get(game_id)
         if not game:
             continue
+
         own_team = row.get("team_id")
         if own_team == game.get("home_team_id"):
             opponent_id = game.get("away_team_id")
@@ -912,39 +940,58 @@ try:
             opponent_id = game.get("home_team_id")
         else:
             continue
-        display_rows.append({
+
+        fgm = _ep_absence_number(row.get("fgm"))
+        fga = _ep_absence_number(row.get("fga"))
+        tpm = _ep_absence_number(row.get("tpm"))
+        tpa = _ep_absence_number(row.get("tpa"))
+        ftm = _ep_absence_number(row.get("ftm"))
+        fta = _ep_absence_number(row.get("fta"))
+
+        minutes = row.get("minutes")
+        if isinstance(minutes, (int, float)):
+            minutes_display = f"{minutes:g}"
+        else:
+            minutes_display = str(minutes) if minutes not in (None, "") else "—"
+
+        output.append({
             "Datum": pd.to_datetime(game.get("start_time"), errors="coerce"),
-            "Protivnik": sofa_team_names.get(opponent_id, "Nepoznat tim"),
-            "Minuta": row.get("minutes"),
-            "SLB": row.get("ftm"), "SLP": row.get("fta"),
-            # player_boxscores.fgm/fga are total field goals; subtract threes for 2P splits.
-            "2PM": (float(row["fgm"]) - float(row["tpm"])) if row.get("fgm") is not None and row.get("tpm") is not None else None,
-            "2PA": (float(row["fga"]) - float(row["tpa"])) if row.get("fga") is not None and row.get("tpa") is not None else None,
-            "3PM": row.get("tpm"), "3PA": row.get("tpa"),
+            "Protivnik": team_names.get(opponent_id, "Nepoznat tim"),
+            "Minutaža": minutes_display,
+            "Slobodna bacanja": f"{int(ftm)}/{int(fta)}" if ftm is not None and fta is not None else "—",
+            "Šutevi za 2": (
+                f"{int(fgm - tpm)}/{int(fga - tpa)}"
+                if fgm is not None and fga is not None and tpm is not None and tpa is not None else "—"
+            ),
+            "Trojke": f"{int(tpm)}/{int(tpa)}" if tpm is not None and tpa is not None else "—",
         })
-    sofa_profile_df = pd.DataFrame(display_rows)
-    if sofa_profile_df.empty:
-        st.info("SofaScore podaci još nisu učitani za ovog igrača. Biće prikazani nakon sledećeg uspešnog osvežavanja istorijskih utakmica.")
-    else:
-        sofa_profile_df = sofa_profile_df.sort_values("Datum", ascending=False)
-        sofa_opponents = sorted(sofa_profile_df["Protivnik"].dropna().unique())
-        chosen_sofa_opponent = st.selectbox(
-            "Protivnik", ["Svi protivnici"] + sofa_opponents,
-            key="sofa_player_opponent_filter"
+
+    per_game_df = pd.DataFrame(output)
+    if per_game_df.empty:
+        st.info(
+            "Nema SportAPI boxscore zapisa za ovog igrača. Proveri da li je refresh "
+            "učitao njegove utakmice i da li se ime igrača poklapa sa SportAPI bazom."
         )
-        if chosen_sofa_opponent != "Svi protivnici":
-            sofa_profile_df = sofa_profile_df[sofa_profile_df["Protivnik"] == chosen_sofa_opponent]
-        sofa_table = sofa_profile_df.copy()
-        sofa_table["Datum"] = sofa_table["Datum"].map(format_serbian_date)
-        for made_col, att_col, label in [("SLB", "SLP", "Slobodna bacanja"), ("2PM", "2PA", "Za 2 poena"), ("3PM", "3PA", "Za 3 poena")]:
-            sofa_table[label] = sofa_table.apply(
-                lambda r: f"{int(r[made_col])}/{int(r[att_col])}" if pd.notna(r[made_col]) and pd.notna(r[att_col]) else "—", axis=1
-            )
-        sofa_table = sofa_table.rename(columns={"Minuta": "Minutaža"})
-        st.dataframe(sofa_table[["Datum", "Protivnik", "Minutaža", "Slobodna bacanja", "Za 2 poena", "Za 3 poena"]],
-                     use_container_width=True, hide_index=True)
-except Exception as sofa_profile_error:
-    st.info(f"SofaScore statistika trenutno nije dostupna: {sofa_profile_error}")
+    else:
+        per_game_df = per_game_df.sort_values("Datum", ascending=False)
+        opponent_options = sorted(per_game_df["Protivnik"].dropna().unique())
+        selected_opponent = st.selectbox(
+            "Protivnik", ["Svi protivnici"] + opponent_options,
+            key="sportapi_player_opponent_filter"
+        )
+        if selected_opponent != "Svi protivnici":
+            per_game_df = per_game_df[per_game_df["Protivnik"] == selected_opponent]
+        per_game_df["Datum"] = per_game_df["Datum"].map(format_serbian_date)
+        st.dataframe(
+            per_game_df[[
+                "Datum", "Protivnik", "Minutaža",
+                "Slobodna bacanja", "Šutevi za 2", "Trojke"
+            ]],
+            use_container_width=True,
+            hide_index=True
+        )
+except Exception as per_game_error:
+    st.info(f"Učinak po utakmici trenutno nije dostupan: {per_game_error}")
 
 tabs = st.tabs(["Pregled", "Poslednje utakmice", "Protivnici", "Odbrana protivnika", "Analiza uticaja odsustva saigrača"])
 
