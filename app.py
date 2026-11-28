@@ -355,6 +355,54 @@ if is_admin:
                             st.rerun()
                         except Exception as e:
                             st.error(f"Odbijanje nije uspelo: {e}")
+        st.markdown("#### Pregled Premium korisnika")
+        try:
+            premium_rows = sb.table("profiles").select("email,premium_until,role,is_blocked").not_.is_("premium_until", "null").order("premium_until", desc=False).execute().data or []
+            now_utc = datetime.now(timezone.utc)
+            parsed_rows = []
+            for row in premium_rows:
+                if row.get("role") == "admin" or not row.get("premium_until"):
+                    continue
+                try:
+                    expiry = datetime.fromisoformat(str(row["premium_until"]).replace("Z", "+00:00"))
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    days_left = (expiry - now_utc).total_seconds() / 86400
+                except (TypeError, ValueError):
+                    continue
+                if row.get("is_blocked"):
+                    status = "Blokiran"
+                elif days_left < 0:
+                    status = "Istekao"
+                elif days_left <= 7:
+                    status = "Ističe uskoro"
+                else:
+                    status = "Aktivan"
+                parsed_rows.append({
+                    "Email": row.get("email") or "—",
+                    "Datum isteka": format_serbian_date(row.get("premium_until")),
+                    "Preostalo dana": max(0, int(days_left + 0.999)) if days_left >= 0 else 0,
+                    "Status": status,
+                    "_sort": expiry,
+                })
+            parsed_rows.sort(key=lambda item: item["_sort"])
+            active_count = sum(x["Status"] == "Aktivan" for x in parsed_rows)
+            soon_count = sum(x["Status"] == "Ističe uskoro" for x in parsed_rows)
+            expired_count = sum(x["Status"] == "Istekao" for x in parsed_rows)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Aktivni", active_count)
+            m2.metric("Ističu za 7 dana", soon_count)
+            m3.metric("Istekli", expired_count)
+            status_filter = st.selectbox("Prikaži korisnike", ["Svi", "Aktivni", "Ističe uskoro", "Istekli", "Blokirani"], key="premium_expiry_filter")
+            status_map = {"Svi": None, "Aktivni": "Aktivan", "Ističe uskoro": "Ističe uskoro", "Istekli": "Istekao", "Blokirani": "Blokiran"}
+            visible_rows = [x for x in parsed_rows if status_map[status_filter] is None or x["Status"] == status_map[status_filter]]
+            if visible_rows:
+                st.dataframe(pd.DataFrame([{k: v for k, v in x.items() if k != "_sort"} for x in visible_rows]), use_container_width=True, hide_index=True)
+            else:
+                st.info("Nema korisnika u izabranoj kategoriji.")
+        except Exception as e:
+            st.error(f"Ne mogu da učitam pregled Premium korisnika: {e}")
+
         st.markdown("#### Upravljanje korisnikom")
         target_email = st.text_input("Email korisnika za produženje ili blokadu", key="admin_target_email")
         extra_days = st.selectbox("Produži Premium za", [30, 90, 365], format_func=lambda x: {30:"30 dana",90:"90 dana",365:"365 dana"}[x])
