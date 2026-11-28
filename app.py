@@ -34,7 +34,8 @@ def _ep_absence_number(value):
 
 def show_absence_impact(sb_client, selected_player_name):
     """Poredi statistiku igraca kada je potvrđeni saigrač igrao i kada je bio DNP."""
-    with st.expander("🧩 Uticaj odsutnog saigrača", expanded=True):
+    st.subheader("🧩 Uticaj odsutnog saigrača")
+    with st.container():
         st.caption(
             "Odsustvo se računa samo kada SportAPI ili SofaScore eksplicitno evidentira DNP / missing player. "
             "Samo odsustvo igrača iz boxscore-a nije dokaz da nije nastupio."
@@ -892,7 +893,7 @@ b.metric("Minuta", fmt(avg(player_df, "min")))
 c.metric("FG%", fmt(100 * safe_num(player_df["fgm"]).sum() / max(1, safe_num(player_df["fga"]).sum())))
 d.metric("3P%", fmt(100 * safe_num(player_df["3pm"]).sum() / max(1, safe_num(player_df["3pa"]).sum())))
 
-tabs = st.tabs(["Pregled", "Poslednje utakmice", "Protivnici", "Odbrana protivnika"])
+tabs = st.tabs(["Pregled", "Poslednje utakmice", "Protivnici", "Odbrana protivnika", "Analiza uticaja odsustva saigrača"])
 
 with tabs[0]:
     chart_stat = st.selectbox("Statistika za grafikon", ["Poeni", "Skokovi", "Asistencije", "Trojke", "PIR"], key="chart_stat")
@@ -931,9 +932,6 @@ with tabs[1]:
                                   "reb":"REB","ast":"AST","3pm":"3PM","3pa":"3PA","stl":"STL",
                                   "tov":"TOV","blk":"BLK","pir":"PIR"}),
                  use_container_width=True, hide_index=True)
-
-    # Analiza odsustva pripada tabu Poslednje utakmice, odmah ispod tabele.
-    show_absence_impact(sb, chosen_player)
 
     st.markdown("#### Detaljan učinak po utakmici")
     detail_options = list(range(len(player_df)))
@@ -1363,3 +1361,7 @@ with st.expander("Otvori procenu igrača koji nedostaje", expanded=True):
 if load_errors:
     with st.expander("Upozorenja pri preuzimanju sezona"):
         st.write("\n".join(load_errors))
+
+
+with tabs[4]:
+    show_absence_impact(sb, chosen_player)
