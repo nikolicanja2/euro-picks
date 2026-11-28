@@ -865,7 +865,7 @@ d.metric("3P%", fmt(100 * safe_num(player_df["3pm"]).sum() / max(1, safe_num(pla
 
 # Učinak igrača po protivniku — SportAPI boxscore za svaku utakmicu.
 st.markdown("### 🏀 Učinak igrača po protivniku")
-st.caption("Izvor: SportAPI • minutaža, slobodna bacanja, šutevi za 2 i šutevi za 3.")
+st.caption("Minutaža, slobodna bacanja, šutevi za 2 i šutevi za 3.")
 try:
     # Profilni CSV i SportAPI mogu zapisivati ime sa različitim dijakriticima.
     # Prvo tražimo tačno ime, a zatim proširujemo pretragu po prezimenu.
@@ -1277,8 +1277,10 @@ elif not db_offers.empty:
     db_offers = db_offers.rename(columns={
         "market":"Tržište", "line":"Granica", "bookmaker":"Kladionica",
         "over_odds":"OVER kvota", "under_odds":"UNDER kvota",
-        "captured_at":"Vreme preuzimanja", "game_id":"ID utakmice", "source":"Izvor"
+        "captured_at":"Vreme preuzimanja", "game_id":"ID utakmice"
     })
+    # Tehnički podatak o izvoru ostaje u bazi, ali se ne prikazuje korisniku.
+    db_offers = db_offers.drop(columns=["source"], errors="ignore")
     st.dataframe(db_offers, use_container_width=True, hide_index=True)
 # No empty bookmaker-offer message is shown when there are no current offers.
 st.caption("Istorijska analiza učinka")
