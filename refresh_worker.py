@@ -302,13 +302,9 @@ def main():
         return
     logging.info("EuroLeague competitions selected: %s", [x.get("name") for x in euro_leagues])
 
-    today = local_now.date()
-    # Keep a rolling retry window: a game whose box score was temporarily
-    # unavailable is checked again on subsequent daily runs.
-    wanted_dates = {
-        (today + timedelta(days=offset)).isoformat()
-        for offset in range(-7, 3)
-    }
+    # Read the full current EuroLeague season on every run. Existing complete
+    # v2 boxscores are skipped below; games missing from the database are backfilled
+    # from the start of the season, not just from a rolling 10-day window.
     games_by_id = {}
 
     # Use the league's own schedule/results endpoint instead of the global
@@ -318,7 +314,7 @@ def main():
         slug = league.get("slug") or "euroleague"
         season = league.get("current_season")
         for status in ("finished", "scheduled"):
-            params = {"status": status, "limit": 200}
+            params = {"status": status, "limit": 500}
             if season:
                 params["season"] = str(season)
             payload = get(f"/leagues/{slug}/games", params)
@@ -333,9 +329,6 @@ def main():
                         start_dt = datetime.fromisoformat(str(start_value).replace("Z", "+00:00"))
                         if start_dt.tzinfo is None:
                             start_dt = start_dt.replace(tzinfo=ZoneInfo("UTC"))
-                        local_day = start_dt.astimezone(ZoneInfo("Europe/Belgrade")).date().isoformat()
-                        if local_day not in wanted_dates:
-                            continue
                     except (TypeError, ValueError):
                         logging.warning("Could not parse game date %r for game %s", start_value, game.get("id"))
                         continue
@@ -388,7 +381,7 @@ def main():
     upsert("competition_seasons", season_rows)
     upsert("teams", team_rows)
     upsert("games", game_rows)
-    logging.info("EuroLeague: %d games found across four dates; %d finished games advertise box scores", len(game_rows), len(finished))
+    logging.info("EuroLeague: %d current-season games found; %d finished games advertise box scores", len(game_rows), len(finished))
 
     player_rows, box_rows = [], []
     fetched_games = skipped_games = dnp_count = 0
