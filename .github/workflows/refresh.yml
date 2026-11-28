@@ -1,13 +1,20 @@
 name: EURO PICKS EuroLeague refresh
+
 on:
+  # GitHub Actions cron uses UTC. Run at both possible UTC hours for
+  # midnight in Europe/Belgrade (CET/CEST); worker skips the non-midnight run.
   schedule:
+    - cron: "0 22 * * *"
     - cron: "0 23 * * *"
   workflow_dispatch:
+
 permissions:
   contents: read
+
 concurrency:
   group: euro-picks-refresh
   cancel-in-progress: false
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
