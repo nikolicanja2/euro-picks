@@ -3,3 +3,4 @@ pandas
 plotly
 requests
 supabase
+extra-streamlit-components>=0.1.80
