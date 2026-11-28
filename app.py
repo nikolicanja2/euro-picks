@@ -6,6 +6,7 @@ from io import BytesIO
 import html
 import re
 import unicodedata
+import extra_streamlit_components as stx
 
 
 
@@ -185,6 +186,41 @@ def get_supabase():
 supabase = get_supabase()
 ADMIN_EMAIL = "anjanikolicfakultet@gmail.com"
 
+# Trajna prijava: refresh token se cuva u browser cookie-ju, a access token
+# ostaje samo u Streamlit sesiji. Supabase automatski rotira refresh token.
+_auth_cookies = stx.CookieManager(key="europicks_auth_cookie_manager")
+_REFRESH_COOKIE = "europicks_refresh_token"
+_COOKIE_DAYS = 30
+
+
+def save_login_session(auth_session, auth_user, remember=True):
+    st.session_state["sb_access_token"] = auth_session.access_token
+    st.session_state["sb_refresh_token"] = auth_session.refresh_token
+    st.session_state["sb_user"] = {"id": auth_user.id, "email": auth_user.email}
+    if remember:
+        _auth_cookies.set(
+            _REFRESH_COOKIE,
+            auth_session.refresh_token,
+            expires_at=datetime.now() + timedelta(days=_COOKIE_DAYS),
+            key="europicks_save_login_cookie",
+            same_site="lax",
+            secure=True,
+        )
+    else:
+        try:
+            _auth_cookies.delete(_REFRESH_COOKIE, key="europicks_clear_old_login_cookie")
+        except Exception:
+            pass
+
+
+def clear_login_session():
+    for key in ["sb_access_token", "sb_refresh_token", "sb_user"]:
+        st.session_state.pop(key, None)
+    try:
+        _auth_cookies.delete(_REFRESH_COOKIE, key="europicks_delete_login_cookie")
+    except Exception:
+        pass
+
 
 def send_europicks_notification(subject, html_body):
     """Send an admin notification through Resend; app operation remains successful if email fails."""
@@ -210,17 +246,40 @@ def send_europicks_notification(subject, html_body):
         return False, str(exc)
 
 
+def restore_login_from_cookie():
+    """Restore a login after the browser/Streamlit session has been restarted."""
+    if st.session_state.get("sb_access_token"):
+        return
+    try:
+        refresh = _auth_cookies.get(_REFRESH_COOKIE)
+    except Exception:
+        refresh = None
+    if not refresh:
+        return
+    try:
+        client = get_supabase()
+        refreshed = client.auth.refresh_session(refresh)
+        if refreshed and refreshed.session and refreshed.user:
+            save_login_session(refreshed.session, refreshed.user, remember=True)
+            st.rerun()
+    except Exception:
+        clear_login_session()
+
+
 def current_user_client():
     client = get_supabase()
     access = st.session_state.get("sb_access_token")
     refresh = st.session_state.get("sb_refresh_token")
     if access and refresh:
         try:
-            client.auth.set_session(access, refresh)
+            response = client.auth.set_session(access, refresh)
+            # Keep the rotated refresh token in the cookie when Supabase returns it.
+            session = getattr(response, "session", None)
+            auth_user = getattr(response, "user", None) or st.session_state.get("sb_user")
+            if session and auth_user:
+                save_login_session(session, auth_user, remember=True)
         except Exception:
-            st.session_state.pop("sb_access_token", None)
-            st.session_state.pop("sb_refresh_token", None)
-            st.session_state.pop("sb_user", None)
+            clear_login_session()
             st.rerun()
     return client
 
@@ -233,12 +292,11 @@ def auth_screen():
     with login_tab:
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Lozinka", type="password", key="login_password")
+        remember_login = st.checkbox("Ostani prijavljen/a na ovom uređaju", value=True, key="remember_login")
         if st.button("Prijavi se", type="primary", use_container_width=True):
             try:
                 result = supabase.auth.sign_in_with_password({"email": email.strip(), "password": password})
-                st.session_state["sb_access_token"] = result.session.access_token
-                st.session_state["sb_refresh_token"] = result.session.refresh_token
-                st.session_state["sb_user"] = {"id": result.user.id, "email": result.user.email}
+                save_login_session(result.session, result.user, remember=remember_login)
                 st.rerun()
             except Exception as e:
                 st.error(f"Prijava nije uspela: {e}")
@@ -255,15 +313,15 @@ def auth_screen():
                 try:
                     result = supabase.auth.sign_up({"email": new_email.strip(), "password": new_password})
                     if result.session:
-                        st.session_state["sb_access_token"] = result.session.access_token
-                        st.session_state["sb_refresh_token"] = result.session.refresh_token
-                        st.session_state["sb_user"] = {"id": result.user.id, "email": result.user.email}
+                        save_login_session(result.session, result.user, remember=True)
                         st.rerun()
                     else:
                         st.success("Nalog je napravljen. Proveri email i potvrdi adresu, pa se prijavi.")
                 except Exception as e:
                     st.error(f"Registracija nije uspela: {e}")
 
+
+restore_login_from_cookie()
 
 if not st.session_state.get("sb_access_token"):
     auth_screen()
@@ -274,7 +332,7 @@ user = st.session_state.get("sb_user") or {}
 user_email = (user.get("email") or "").lower()
 user_id = user.get("id")
 try:
-    profile_result = sb.table("profiles").select("role,premium_until,is_blocked").eq("id", user_id).single().execute()
+    profile_result = sb.table("profiles").select("role,premium_until,is_blocked,premium_expiry_logout_at").eq("id", user_id).single().execute()
     profile = profile_result.data or {}
 except Exception:
     profile = {}
@@ -282,7 +340,7 @@ except Exception:
 if profile.get("is_blocked"):
     st.error("Ovaj nalog je blokiran. Kontaktiraj EURO PICKS administraciju.")
     if st.button("Odjavi se"):
-        st.session_state.clear()
+        clear_login_session()
         st.rerun()
     st.stop()
 
@@ -324,20 +382,33 @@ if premium_until:
     except Exception:
         premium_until_dt = None
 
-# Ako je istekao baš probni Premium (a nije naknadno odobren plaćeni paket),
-# odmah odjavi korisnika i vrati ga na ekran za prijavu.
-trial_expired = bool(
-    trial_used and trial_expires_dt and datetime.now(timezone.utc) >= trial_expires_dt
-    and (premium_until_dt is None or premium_until_dt <= trial_expires_dt + timedelta(seconds=5))
+# Kada Premium (placeni paket ili probnih 24h) istekne, korisnik se odjavljuje samo jednom.
+# Marker u profilu sprecava ponovnu odjavu pri sledecem logovanju, kako bi mogao da zatrazi novi paket.
+now_utc = datetime.now(timezone.utc)
+expiry_logout_at = profile.get("premium_expiry_logout_at")
+try:
+    expiry_logout_dt = datetime.fromisoformat(str(expiry_logout_at).replace("Z", "+00:00")) if expiry_logout_at else None
+    if expiry_logout_dt and expiry_logout_dt.tzinfo is None:
+        expiry_logout_dt = expiry_logout_dt.replace(tzinfo=timezone.utc)
+except Exception:
+    expiry_logout_dt = None
+
+premium_just_expired = bool(
+    not is_admin and premium_until_dt and premium_until_dt <= now_utc
+    and (expiry_logout_dt is None or expiry_logout_dt < premium_until_dt)
 )
-if trial_expired:
+if premium_just_expired:
+    try:
+        sb.table("profiles").update({"premium_expiry_logout_at": now_utc.isoformat()}).eq("id", user_id).execute()
+    except Exception as marker_error:
+        st.error("Nije moguće evidentirati istek Premium pristupa. Proveri SQL migraciju u paketu.")
+        st.stop()
     try:
         sb.auth.sign_out()
     except Exception:
         pass
-    for key in ["sb_access_token", "sb_refresh_token", "sb_user"]:
-        st.session_state.pop(key, None)
-    st.warning("Probni Premium period od 24 sata je istekao. Prijavi se ponovo ili izaberi Premium paket.")
+    clear_login_session()
+    st.warning("Premium pristup je istekao. Prijavi se ponovo da bi zatražio/la novi paket i pristup uz uplatu.")
     auth_screen()
     st.stop()
 
@@ -349,28 +420,29 @@ with st.sidebar:
             sb.auth.sign_out()
         except Exception:
             pass
-        for key in ["sb_access_token", "sb_refresh_token", "sb_user"]:
-            st.session_state.pop(key, None)
+        clear_login_session()
         st.rerun()
 
-# Dok traje baš probni pristup (ne plaćeni Premium), proveri istek na svakih 30 sekundi.
-if (not is_admin and is_premium and trial_used and trial_expires_dt
-        and premium_until_dt and abs((premium_until_dt - trial_expires_dt).total_seconds()) <= 5
-        and hasattr(st, "fragment")):
-    _trial_until_for_watch = trial_expires_dt
+# Proverava istek tokom otvorene sesije (ukljucujuci pakete 30/90/365 dana i probnih 24h).
+if (not is_admin and is_premium and premium_until_dt and hasattr(st, "fragment")):
+    _ep_premium_until_watch = premium_until_dt
+    _ep_user_id_watch = user_id
 
     @st.fragment(run_every="30s")
-    def _ep_trial_expiry_watch():
-        if datetime.now(timezone.utc) >= _trial_until_for_watch:
+    def _ep_premium_expiry_watch():
+        if datetime.now(timezone.utc) >= _ep_premium_until_watch:
+            try:
+                sb.table("profiles").update({"premium_expiry_logout_at": datetime.now(timezone.utc).isoformat()}).eq("id", _ep_user_id_watch).execute()
+            except Exception:
+                pass
             try:
                 sb.auth.sign_out()
             except Exception:
                 pass
-            for key in ["sb_access_token", "sb_refresh_token", "sb_user"]:
-                st.session_state.pop(key, None)
+            clear_login_session()
             st.rerun()
 
-    _ep_trial_expiry_watch()
+    _ep_premium_expiry_watch()
 
 if not is_admin and not is_premium:
     st.title("🏀 EURO PICKS")
@@ -473,7 +545,7 @@ if is_admin:
                                 old_dt = now
                             start = max(now, old_dt)
                             until = start + timedelta(days=int(req["duration_days"]))
-                            sb.table("profiles").update({"premium_until": until.isoformat(), "is_blocked": False}).eq("id", req["user_id"]).execute()
+                            sb.table("profiles").update({"premium_until": until.isoformat(), "premium_expiry_logout_at": None, "is_blocked": False}).eq("id", req["user_id"]).execute()
                             sb.table("premium_requests").update({"status": "approved", "reviewed_at": now.isoformat()}).eq("id", req["id"]).execute()
                             st.success(f"Premium aktiviran do {until.strftime('%d.%m.%Y')}.")
                             st.rerun()
@@ -546,7 +618,7 @@ if is_admin:
                 except Exception:
                     old_dt = now
                 until = max(now, old_dt) + timedelta(days=extra_days)
-                sb.table("profiles").update({"premium_until": until.isoformat()}).eq("id", found["id"]).execute()
+                sb.table("profiles").update({"premium_until": until.isoformat(), "premium_expiry_logout_at": None}).eq("id", found["id"]).execute()
                 st.success(f"Premium produžen do {until.strftime('%d.%m.%Y')}.")
                 st.rerun()
             except Exception as e:
